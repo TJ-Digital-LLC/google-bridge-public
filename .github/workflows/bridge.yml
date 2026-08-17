@@ -49,7 +49,13 @@ jobs:
           from google.oauth2 import service_account
           from google.auth.transport.requests import Request
 
-          info = json.loads(os.environ['GOOGLE_SA_KEY'])
+          raw_key = os.environ.get('GOOGLE_SA_KEY', '').strip()
+          if not raw_key:
+              print('GOOGLE_SA_KEY secret is not configured yet.')
+              print('Nothing to do. Follow README setup step 3, then push a request.')
+              raise SystemExit(0)
+
+          info = json.loads(raw_key)
           creds = service_account.Credentials.from_service_account_info(
               info, scopes=['https://www.googleapis.com/auth/drive'])
           creds.refresh(Request())
@@ -61,7 +67,13 @@ jobs:
               result_path = f'results/{base}'
               if os.path.exists(result_path):
                   continue
-              req = json.load(open(path))
+              try:
+                  req = json.load(open(path))
+              except Exception as e:
+                  json.dump({'operation': None, 'status': 'error',
+                             'error': f'malformed request JSON: {e}'[:500]},
+                            open(result_path, 'w'), indent=1)
+                  continue
               op = req.get('operation')
               out = {'operation': op, 'status': 'error', 'error': 'unknown operation'}
               try:

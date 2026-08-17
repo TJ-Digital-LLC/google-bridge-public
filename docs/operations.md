@@ -104,6 +104,8 @@ Reply to one comment, or to several in a batch, optionally resolving them.
 
 Generates up to 8 images with Gemini and uploads them to a Drive folder. Each image gets a `direct_url` usable by `insert_images`.
 
+**Privacy note:** by default each image is set to "anyone with the link can view" (`"link_readable": true`). This is required for `insert_images`, because the Docs API fetches the image from a public URL. If you do not need doc insertion, pass `"link_readable": false` and the images stay private to the shared folder.
+
 ```json
 {
   "operation": "generate_images",
