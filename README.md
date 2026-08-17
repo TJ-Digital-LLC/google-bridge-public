@@ -4,7 +4,7 @@
 
 Google Bridge is a GitHub repository that works like a mailbox between an AI assistant (Claude, or any AI that can write to GitHub) and Google Workspace. The assistant drops a request in the mailbox, GitHub Actions does the work in Google Drive and Google Docs using one company credential, and drops the result back. Every operation is recorded in the git history: who asked for what, when, and what happened.
 
-We built this to run a real content agency: AI-drafted articles land as Google Docs in client folders, client comments come back to the AI, and revisions go out the same way. It runs dozens of documents a week. Now it is open for anyone to use.
+We built this to run a real content agency: AI-drafted articles land as Google Docs in client folders, client comments come back to the AI, and revisions go out the same way. It is the delivery layer of our content pipeline, in production with real clients. Now it is open for anyone to use.
 
 ## The problem this solves
 
@@ -69,13 +69,15 @@ Then ask your assistant for a document. It will show up in your Drive.
 
 - The Google credential lives only as a GitHub Actions secret. The AI never sees it, and it never appears in the chat, the repo files, or the git history.
 - The AI's GitHub token is fine-grained and scoped to this single repository. Worst case if leaked: someone can file doc requests in your bridge, all of them logged in git.
+- Give each team member (or each AI project) its own fine-grained token: the git history then attributes every request to a specific person, and you can revoke one person's access without touching anyone else's.
+- The workflow only executes its fixed set of operations. Request files are data, never code: nothing in a request can run commands, reach other APIs, or touch other repos.
 - The service account only reaches the folders you explicitly share with it. Nothing else in your Drive is visible.
 - Every operation is a commit: full audit trail for free.
 - The workflow never interpolates untrusted input into shell commands.
 
 ## FAQ
 
-**What does it cost?** Nothing. GitHub Actions free tier (2,000 minutes per month on private repos) covers far more operations than a content team produces. Google service accounts are free. The optional image generation uses your own Gemini API key at Gemini prices.
+**What does it cost?** Nothing. One operation takes about a minute of GitHub Actions time, and the free tier gives private repos 2,000 minutes a month, so roughly 2,000 operations before you would pay a cent. A content team does not get close. Google service accounts are free. The optional image generation uses your own Gemini API key at Gemini prices.
 
 **Does it work with assistants other than Claude?** Yes. Any AI that can make HTTP calls to the GitHub API (or commit to a repo) can use the bridge. The request format is plain JSON.
 
@@ -83,7 +85,7 @@ Then ask your assistant for a document. It will show up in your Drive.
 
 **Can it create files in My Drive?** No. Google service accounts can only create files in shared drives. It can edit and comment on My Drive files that are shared with it.
 
-**What is the catch?** Latency. Each operation takes about 60 to 90 seconds because it rides on GitHub Actions. For drafting and delivering documents this is irrelevant. For interactive editing it is not the right tool.
+**What is the catch?** Latency and scope. Each operation takes about 60 to 90 seconds because it rides on GitHub Actions, and operations run one at a time (serialized on purpose, so results never race). For a team drafting and delivering documents this is irrelevant; for high-volume automation or interactive editing it is not the right tool. And it covers Google Docs and Drive today: no Sheets or Slides operations yet.
 
 ## License
 
