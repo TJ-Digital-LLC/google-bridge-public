@@ -1,0 +1,337 @@
+name: bridge
+
+# Google Bridge: lets an AI assistant on a subscription plan (no server, no API keys
+# in the chat) execute real operations in Google Drive and Google Docs.
+#
+# How it works: the assistant commits a JSON request to requests/, this workflow
+# executes it against Google APIs using the service account stored as a secret,
+# and commits the outcome to results/ under the same filename.
+#
+# Security note: this workflow never interpolates untrusted event input into run
+# commands. Secrets are passed only through env vars.
+#
+# Required secret:  GOOGLE_SA_KEY  (Google service account JSON)
+# Optional secret:  GEMINI_API_KEY (only for the generate_images operation)
+
+on:
+  push:
+    branches: [main]
+    paths: ['requests/**']
+
+concurrency:
+  group: bridge
+  cancel-in-progress: false
+
+# Needed so the workflow can commit results back to this repo.
+permissions:
+  contents: write
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install --quiet google-auth requests
+
+      - name: Process pending requests
+        env:
+          GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python3 << 'EOF'
+          import os, json, base64, glob, requests
+          from google.oauth2 import service_account
+          from google.auth.transport.requests import Request
+
+          info = json.loads(os.environ['GOOGLE_SA_KEY'])
+          creds = service_account.Credentials.from_service_account_info(
+              info, scopes=['https://www.googleapis.com/auth/drive'])
+          creds.refresh(Request())
+          H = {'Authorization': f'Bearer {creds.token}'}
+
+          os.makedirs('results', exist_ok=True)
+          for path in sorted(glob.glob('requests/*.json')):
+              base = os.path.basename(path)
+              result_path = f'results/{base}'
+              if os.path.exists(result_path):
+                  continue
+              req = json.load(open(path))
+              op = req.get('operation')
+              out = {'operation': op, 'status': 'error', 'error': 'unknown operation'}
+              try:
+                  if op == 'create_doc':
+                      html = base64.b64decode(req['html_base64']).decode('utf-8')
+                      meta = {'name': req['name'],
+                              'mimeType': 'application/vnd.google-apps.document',
+                              'parents': [req['folder_id']]}
+                      files = {
+                          'metadata': ('metadata', json.dumps(meta), 'application/json; charset=UTF-8'),
+                          'file': ('file', html, 'text/html'),
+                      }
+                      r = requests.post(
+                          'https://www.googleapis.com/upload/drive/v3/files'
+                          '?uploadType=multipart&supportsAllDrives=true&fields=id,webViewLink,name',
+                          headers=H, files=files)
+                      r.raise_for_status()
+                      out = {'operation': op, 'status': 'ok', **r.json()}
+                  elif op == 'update_doc':
+                      html = base64.b64decode(req['html_base64']).decode('utf-8')
+                      files = {
+                          'metadata': ('metadata', json.dumps({}), 'application/json; charset=UTF-8'),
+                          'file': ('file', html, 'text/html'),
+                      }
+                      r = requests.patch(
+                          f"https://www.googleapis.com/upload/drive/v3/files/{req['doc_id']}"
+                          '?uploadType=multipart&supportsAllDrives=true&fields=id,webViewLink,name',
+                          headers=H, files=files)
+                      r.raise_for_status()
+                      out = {'operation': op, 'status': 'ok', **r.json()}
+                  elif op == 'replace_text':
+                      reqs = [{'replaceAllText': {
+                                  'containsText': {'text': rep['find'], 'matchCase': True},
+                                  'replaceText': rep['replace']}}
+                              for rep in req['replacements']]
+                      r = requests.post(
+                          f"https://docs.googleapis.com/v1/documents/{req['doc_id']}:batchUpdate",
+                          headers=H, json={'requests': reqs})
+                      r.raise_for_status()
+                      occ = [rr.get('replaceAllText', {}).get('occurrencesChanged', 0)
+                             for rr in r.json().get('replies', [])]
+                      out = {'operation': op, 'status': 'ok',
+                             'replacements': [{'find': rep['find'],
+                                               'occurrences_changed': occ[i] if i < len(occ) else 0}
+                                              for i, rep in enumerate(req['replacements'])]}
+                  elif op == 'read_doc':
+                      r = requests.get(
+                          f"https://www.googleapis.com/drive/v3/files/{req['doc_id']}/export",
+                          headers=H, params={'mimeType': 'text/plain'})
+                      r.raise_for_status()
+                      out = {'operation': op, 'status': 'ok',
+                             'text_base64': base64.b64encode(r.content).decode('ascii')}
+                  elif op == 'copy_doc':
+                      body = {}
+                      if req.get('name'):
+                          body['name'] = req['name']
+                      if req.get('dest_folder_id'):
+                          body['parents'] = [req['dest_folder_id']]
+                      r = requests.post(
+                          f"https://www.googleapis.com/drive/v3/files/{req['doc_id']}/copy"
+                          '?supportsAllDrives=true&fields=id,webViewLink,name,parents',
+                          headers=H, json=body)
+                      r.raise_for_status()
+                      out = {'operation': op, 'status': 'ok', **r.json()}
+                  elif op == 'create_folder':
+                      meta = {'name': req['name'],
+                              'mimeType': 'application/vnd.google-apps.folder',
+                              'parents': [req['parent_id']]}
+                      r = requests.post(
+                          'https://www.googleapis.com/drive/v3/files'
+                          '?supportsAllDrives=true&fields=id,webViewLink,name',
+                          headers=H, json=meta)
+                      r.raise_for_status()
+                      out = {'operation': op, 'status': 'ok', **r.json()}
+                  elif op == 'list_comments':
+                      m = requests.get(
+                          f"https://www.googleapis.com/drive/v3/files/{req['doc_id']}",
+                          headers=H, params={'fields': 'name', 'supportsAllDrives': 'true'})
+                      m.raise_for_status()
+                      r = requests.get(
+                          f"https://www.googleapis.com/drive/v3/files/{req['doc_id']}/comments",
+                          headers=H,
+                          params={'fields': 'comments(id,author(displayName),content,'
+                                            'quotedFileContent(value),resolved,'
+                                            'replies(author(displayName),content))',
+                                  'includeDeleted': 'false', 'pageSize': 100})
+                      r.raise_for_status()
+                      out = {'operation': op, 'status': 'ok',
+                             'doc_name': m.json().get('name'), **r.json()}
+                  elif op == 'reply_comment':
+                      r = requests.post(
+                          f"https://www.googleapis.com/drive/v3/files/{req['doc_id']}"
+                          f"/comments/{req['comment_id']}/replies",
+                          headers=H, params={'fields': 'id,content'},
+                          json={'content': req['reply_text']})
+                      r.raise_for_status()
+                      out = {'operation': op, 'status': 'ok', **r.json()}
+                  elif op == 'reply_comments':
+                      results = []
+                      for rep in req['replies']:
+                          body = {'content': rep['reply_text']}
+                          if rep.get('resolve'):
+                              body['action'] = 'resolve'
+                          r = requests.post(
+                              f"https://www.googleapis.com/drive/v3/files/{req['doc_id']}"
+                              f"/comments/{rep['comment_id']}/replies",
+                              headers=H, params={'fields': 'id,content,action'},
+                              json=body)
+                          results.append({'comment_id': rep['comment_id'],
+                                          'ok': r.status_code < 300,
+                                          'http_status': r.status_code,
+                                          'resolved': bool(rep.get('resolve')) and r.status_code < 300})
+                      out = {'operation': op, 'status': 'ok', 'results': results}
+                  elif op == 'generate_images':
+                      gk = os.environ.get('GEMINI_API_KEY')
+                      if not gk:
+                          raise Exception('GEMINI_API_KEY secret not configured (optional feature)')
+                      prompts = req['prompts']
+                      if not isinstance(prompts, list) or not prompts:
+                          raise Exception('generate_images needs a non-empty prompts list')
+                      if len(prompts) > 8:
+                          raise Exception('generate_images caps at 8 prompts per request')
+                      folder = req['folder_id']
+                      model = req.get('model', 'gemini-3.1-flash-image')
+                      slug = req.get('slug', 'image')
+                      sub = req.get('subfolder')
+                      if sub:
+                          q = (f"'{folder}' in parents and name = '{sub}' "
+                               "and mimeType = 'application/vnd.google-apps.folder' and trashed = false")
+                          fr = requests.get('https://www.googleapis.com/drive/v3/files', headers=H,
+                                            params={'q': q, 'fields': 'files(id)',
+                                                    'supportsAllDrives': 'true',
+                                                    'includeItemsFromAllDrives': 'true'})
+                          fr.raise_for_status()
+                          hits = fr.json().get('files', [])
+                          if hits:
+                              folder = hits[0]['id']
+                          else:
+                              fmeta = {'name': sub,
+                                       'mimeType': 'application/vnd.google-apps.folder',
+                                       'parents': [folder]}
+                              fc = requests.post(
+                                  'https://www.googleapis.com/drive/v3/files'
+                                  '?supportsAllDrives=true&fields=id', headers=H, json=fmeta)
+                              fc.raise_for_status()
+                              folder = fc.json()['id']
+                      images = []
+                      for p in prompts:
+                          pname = p.get('name', f"image-{len(images)+1}")
+                          try:
+                              gbody = {'contents': [{'parts': [{'text': p['prompt']}]}],
+                                       'generationConfig': {'responseModalities': ['TEXT', 'IMAGE']}}
+                              if p.get('aspect_ratio'):
+                                  gbody['generationConfig']['imageConfig'] = {'aspectRatio': p['aspect_ratio']}
+                              g = requests.post(
+                                  f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+                                  params={'key': gk}, json=gbody, timeout=180)
+                              g.raise_for_status()
+                              img_b64 = None
+                              for part in g.json().get('candidates', [{}])[0].get('content', {}).get('parts', []):
+                                  if 'inlineData' in part:
+                                      img_b64 = part['inlineData']['data']
+                                      break
+                              if not img_b64:
+                                  images.append({'name': pname, 'ok': False, 'error': 'no image in model response'})
+                                  continue
+                              meta = {'name': f'{slug}-{pname}.png', 'parents': [folder]}
+                              files = {
+                                  'metadata': ('metadata', json.dumps(meta), 'application/json; charset=UTF-8'),
+                                  'file': ('file', base64.b64decode(img_b64), 'image/png'),
+                              }
+                              u = requests.post(
+                                  'https://www.googleapis.com/upload/drive/v3/files'
+                                  '?uploadType=multipart&supportsAllDrives=true&fields=id,webViewLink,name',
+                                  headers=H, files=files)
+                              u.raise_for_status()
+                              uj = u.json()
+                              if req.get('link_readable', True):
+                                  pr = requests.post(
+                                      f"https://www.googleapis.com/drive/v3/files/{uj['id']}/permissions"
+                                      '?supportsAllDrives=true',
+                                      headers=H, json={'role': 'reader', 'type': 'anyone'})
+                                  uj['link_readable'] = pr.status_code < 300
+                              uj['direct_url'] = f"https://drive.google.com/uc?id={uj['id']}"
+                              images.append({'name': pname, 'ok': True, **uj})
+                          except requests.HTTPError as e:
+                              images.append({'name': pname, 'ok': False,
+                                             'http_status': e.response.status_code,
+                                             'error': e.response.text[:300]})
+                          except Exception as e:
+                              images.append({'name': pname, 'ok': False, 'error': str(e)[:300]})
+                      ok_count = sum(1 for i in images if i.get('ok'))
+                      out = {'operation': op,
+                             'status': 'ok' if ok_count == len(images) else ('partial' if ok_count else 'error'),
+                             'model': model, 'images': images}
+                  elif op == 'insert_images':
+                      doc_id = req['doc_id']
+                      mappings = req['mappings']
+                      if not isinstance(mappings, list) or not mappings:
+                          raise Exception('insert_images needs a non-empty mappings list')
+                      if len(mappings) > 12:
+                          raise Exception('insert_images caps at 12 mappings per request')
+                      dg = requests.get(f'https://docs.googleapis.com/v1/documents/{doc_id}', headers=H)
+                      dg.raise_for_status()
+                      chars = []
+                      def walk(content):
+                          for el in content:
+                              para = el.get('paragraph')
+                              if para:
+                                  for pe in para.get('elements', []):
+                                      tr = pe.get('textRun')
+                                      if tr and 'content' in tr and 'startIndex' in pe:
+                                          start = pe['startIndex']
+                                          for off, ch in enumerate(tr['content']):
+                                              chars.append((start + off, ch))
+                              table = el.get('table')
+                              if table:
+                                  for row in table.get('tableRows', []):
+                                      for cell in row.get('tableCells', []):
+                                          walk(cell.get('content', []))
+                      walk(dg.json().get('body', {}).get('content', []))
+                      full = ''.join(c for _, c in chars)
+                      found = []
+                      results = []
+                      for m in mappings:
+                          ph = m['placeholder']
+                          pos = full.find(ph)
+                          if pos < 0:
+                              results.append({'placeholder': ph[:60], 'ok': False,
+                                              'error': 'placeholder not found in document'})
+                              continue
+                          found.append({'start': chars[pos][0],
+                                        'end': chars[pos + len(ph) - 1][0] + 1,
+                                        'uri': m['image_url'], 'ph': ph[:60]})
+                      found.sort(key=lambda f: f['start'], reverse=True)
+                      if found:
+                          breqs = []
+                          for f in found:
+                              breqs.append({'deleteContentRange': {'range':
+                                            {'startIndex': f['start'], 'endIndex': f['end']}}})
+                              breqs.append({'insertInlineImage': {
+                                            'location': {'index': f['start']},
+                                            'uri': f['uri'],
+                                            'objectSize': {'width': {'magnitude': 468, 'unit': 'PT'}}}})
+                          b = requests.post(
+                              f'https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate',
+                              headers=H, json={'requests': breqs})
+                          b.raise_for_status()
+                          for f in found:
+                              results.append({'placeholder': f['ph'], 'ok': True})
+                      ok_count = sum(1 for r in results if r.get('ok'))
+                      out = {'operation': op,
+                             'status': 'ok' if ok_count == len(mappings) else ('partial' if ok_count else 'error'),
+                             'inserted': ok_count, 'results': results}
+              except requests.HTTPError as e:
+                  out = {'operation': op, 'status': 'error',
+                         'http_status': e.response.status_code,
+                         'error': e.response.text[:500]}
+              except Exception as e:
+                  out = {'operation': op, 'status': 'error', 'error': str(e)[:500]}
+              json.dump(out, open(result_path, 'w'), indent=1)
+          EOF
+
+      - name: Commit results
+        run: |
+          git config user.name "bridge-bot"
+          git config user.email "bridge@users.noreply.github.com"
+          git add results
+          git diff --cached --quiet || git commit -m "bridge: results"
+          for i in 1 2 3 4 5; do
+            git push && break
+            git pull --rebase origin main
+          done
