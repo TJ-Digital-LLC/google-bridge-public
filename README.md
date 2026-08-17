@@ -69,8 +69,8 @@ Then ask your assistant for a document. It will show up in your Drive.
 
 - The Google credential lives only as a GitHub Actions secret. The AI never sees it, and it never appears in the chat, the repo files, or the git history.
 - The AI's GitHub token is fine-grained and scoped to this single repository. Worst case if leaked: someone can file doc requests in your bridge, all of them logged in git.
-- Give each team member (or each AI project) its own fine-grained token: the git history then attributes every request to a specific person, and you can revoke one person's access without touching anyone else's.
 - The workflow only executes its fixed set of operations. Request files are data, never code: nothing in a request can run commands, reach other APIs, or touch other repos.
+- One shared token is fine for most teams. If you ever want per-person attribution, tokens are cheap: issue one per person and the git history does the rest. Optional, not required.
 - The service account only reaches the folders you explicitly share with it. Nothing else in your Drive is visible.
 - Every operation is a commit: full audit trail for free.
 - The workflow never interpolates untrusted input into shell commands.
