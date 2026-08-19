@@ -8,6 +8,7 @@ The bridge is AI-agnostic: anything that can call the GitHub API can use it. Thi
 2. Name: `bridge-access`. Expiration: your call (we use 6 months and rotate).
 3. **Repository access:** "Only select repositories", pick your bridge repo. Nothing else.
 4. **Permissions:** Repository permissions, **Contents: Read and write**. Nothing else.
+   Optional but recommended: also grant **Actions: Read**. It lets the assistant check the workflow run status when a result is slow to appear, instead of polling blind.
 5. Generate and copy the token.
 
 This token can only touch the bridge repo. It cannot see any other repository, and every use is logged as a commit.

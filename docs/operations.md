@@ -4,6 +4,8 @@ Every request is one JSON file committed to `requests/`. The filename must be un
 
 Every result includes `"operation"` and `"status"` (`ok`, `partial`, or `error`). Errors include an `"error"` message and, for API failures, an `"http_status"`.
 
+**If a result never appears:** check the Actions tab of your bridge repo. A failed run leaves the request pending, and the next run picks it up again. That retry is safe for read operations, but for operations with side effects (`create_doc`, `generate_images`) it means the work can happen twice, so look at the failed run's log before pushing new requests.
+
 ## create_doc
 
 Creates a Google Doc from HTML in a Drive folder. HTML gives you headings, bold, lists, links and tables for free.

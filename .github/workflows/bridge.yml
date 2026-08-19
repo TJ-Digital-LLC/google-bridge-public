@@ -343,7 +343,14 @@ jobs:
           git config user.email "bridge@users.noreply.github.com"
           git add results
           git diff --cached --quiet || git commit -m "bridge: results"
+          pushed=""
           for i in 1 2 3 4 5; do
-            git push && break
+            if git push; then pushed=1; break; fi
             git pull --rebase origin main
           done
+          if [ -z "$pushed" ]; then
+            echo "::error::Results were produced but could not be pushed after 5 attempts."
+            echo "::error::The operations DID run (side effects like docs or images may exist)."
+            echo "::error::Re-run this workflow or push manually; pending requests will be re-processed."
+            exit 1
+          fi
